@@ -1,10 +1,10 @@
-// routes/bid.js
 const express = require('express');
 const db = require('../db');
 const Node = require('../models/Node');
 const client = require('../redis/index');
 
 const router = express.Router();
+const redisClient = client.duplicate();
 
 router.post('/bid', async (req, res) => {
     const data = req.body;
@@ -12,159 +12,104 @@ router.post('/bid', async (req, res) => {
                    VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP) 
                    RETURNING id`;
     const values = [data.user_id, data.channel_id, data.quantity, data.price, data.type];
-    
-    const result = await db.query(query, values);
-    const id = result.rows[0].id; // get the id of the inserted row 
-    res.status(201).json(node);
-   
-    const node = new Node(id,data.user_id,data.channel_id,data.price,data.quantity,data.type); 
-    
-    await client.connect();
 
-    const value = await client.get(node.channel_id);
-    if(value === null)  // case where the first request is sent
-    {                           
-        const buy = [];
-        const sell = [];
-        if(node.type === 0)
-        {
-            buy.push(node);
+    try {
+        // Ensure Redis client is connected
+        if (!redisClient.isOpen) await redisClient.connect();
+
+        // Database insert operation
+        const result = await db.query(query, values);
+        const id = result.rows[0].id;
+
+        // Create Node instance
+        const node = new Node(id, data.user_id, data.channel_id, data.price, data.quantity, data.type);
+        res.status(201).json(node);
+
+        // Get current buy/sell arrays from Redis
+        const value = await redisClient.get(node.channel_id);
+        let buy = [], sell = [];
+
+        if (value) {
+            [buy, sell] = JSON.parse(value);
         }
-        else
-        {
-            sell.push(node);
+
+        // Process the order based on its type
+        if (node.type === 0) {
+            await processBuyOrder(node, buy, sell);
+        } else {
+            await processSellOrder(node, buy, sell);
         }
-        await client.set(node.channel_id, JSON.stringify([buy,sell]));
-        
+
+        // Save updated buy/sell arrays back to Redis
+        await redisClient.set(node.channel_id, JSON.stringify([buy, sell]));
+    } catch (error) {
+        console.error('Error processing bid:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
     }
-    else
-    {
-        const bids = JSON.parse(value);
-        const buy = bids[0];
-        const sell = bids[1];
-        if(node.type === 0) 
-        {
-            if(sell[0].price>node.price) // no match occurs
-            {
-                let index=0;
-                while(index<sell.length && buy[index].price>node.price)
-                {
-                    index++;
-                }
-                buy.splice(index,0,node);
-                if(buy.length > 10) // change it to buffer size
-                {
-                    buy.pop();
-                }
-                await client.set(node.channel_id, JSON.stringify([buy,sell]));
-            } 
-            else
-            {
-                while( sell.length > 0 && sell[0].price<=node.price && node.quantity > 0)
-                {
-                    if(node.quantity > sell[0].quantity)
-                    {
-                        node.quantity -= sell[0].quantity;
-                        sell[0].quantity = 0;
-                        const updateQuery = `UPDATE bids SET units = $1,status = 1 WHERE id = $2`;
-                        const updateValues = [sell[0].quantity, sell[0].id];  
-                        await db.query(updateQuery, updateValues);
-                        // add the query in trades table
-                    }
-                    else
-                    {
-                        sell[0].quantity -= node.quantity;
-                        node.quantity = 0;
-                        const updateQuery = `UPDATE bids SET units = $1,status = 1 WHERE id = $2`;
-                        const updateValues = [node.quantity, node.id];  
-                        await db.query(updateQuery, updateValues);
-                        // add the query in trades table
-                    }
-                    if(sell[0].quantity === 0)
-                    {
-                        const updateQuery = `UPDATE bids SET units = $1,status = 1 WHERE id = $2`;
-                        const updateValues = [sell[0].quantity, sell[0].id];  // update query for sell node
-                        await db.query(updateQuery, updateValues);
-                        sell.shift();
-                    }
-                    else
-                    {
-                        const updateQuery = `UPDATE bids SET units = $1 WHERE id = $2`;
-                        const updateValues = [sell[0].quantity, sell[0].id];  // update query for sell node
-                        await db.query(updateQuery, updateValues);
-                    }
-                } 
-                if(node.quantity > 0)
-                {
-                    const updateQuery = `UPDATE bids SET units = $1 WHERE id = $2`;
-                    const updateValues = [node.quantity, node.id];  // update query for current node
-                    await db.query(updateQuery, updateValues);
-                    buy.splice(0,0, node); // add the node to the front of the array
-                }    
-                await client.set(node.channel_id, JSON.stringify([buy,sell]));
-            }   
-        }
-        else // order is sell
-        {
-            if(buy[0].price<node.price) // no match occurs
-            {
-                // check the condition to check whether to add or not
-                let index=0;
-                while(index<buy.length && sell[index].price<node.price)
-                {
-                    index++;
-                }
-                sell.splice(index,0,node);
-                if(sell.length > 10) // change it to buffer size
-                {
-                    sell.pop();
-                }
-                
-                await client.set(node.channel_id, JSON.stringify([buy,sell]));
-            }
-            else
-            {
-                while( buy.length > 0 && buy[0].price>=node.price && node.quantity > 0)
-                {
-                    if(node.quantity > buy[0].quantity)
-                    {
-                        node.quantity -= buy[0].quantity;
-                        buy[0].quantity = 0;
-                        const updateQuery = `UPDATE bids SET units = $1,status = 1 WHERE id = $2`;
-                        const updateValues = [buy[0].quantity, buy[0].id];  
-                        await db.query(updateQuery, updateValues);
-                        // add the query in trades table
-                    }
-                    else
-                    {
-                        buy[0].quantity -= node.quantity;
-                        node.quantity = 0;
-                        const updateQuery = `UPDATE bids SET units = $1,status = 1 WHERE id = $2`;
-                        const updateValues = [node.quantity, node.id];  
-                        await db.query(updateQuery, updateValues);
-                        // add the query in trades table
-                    }
-                    if(buy[0].quantity === 0)
-                    {
-                        const updateQuery = `UPDATE bids SET units = $1,status = 1 WHERE id = $2`;
-                        const updateValues = [buy[0].quantity, buy[0].id];  // update query for buy node
-                        await db.query(updateQuery, updateValues);
-                        buy.shift();
-                    }
-
-                }
-                if(node.quantity > 0)
-                {
-                    const updateQuery = `UPDATE bids SET units = $1 WHERE id = $2`;
-                    const updateValues = [node.quantity, node.id];  
-                    await db.query(updateQuery, updateValues);
-                    sell.splice(0,0, node); 
-                }
-                await client.set(node.channel_id, JSON.stringify([buy,sell]));
-            }
-        }
-    }
-
 });
 
+async function processBuyOrder(node, buy, sell) {
+    if (sell.length === 0 || sell[0].price > node.price) {
+        insertSorted(buy, node, (a, b) => b.price - a.price, 10);
+    } else {
+        await matchOrders(node, sell, buy, 0);
+    }
+}
+
+async function processSellOrder(node, buy, sell) {
+    if (buy.length === 0 || buy[0].price < node.price) {
+        insertSorted(sell, node, (a, b) => a.price - b.price, 10);
+    } else {
+        await matchOrders(node, buy, sell, 1);
+    }
+}
+
+function insertSorted(array, item, comparator, limit) {
+    let index = 0;
+    while (index < array.length && comparator(array[index], item) < 0) {
+        index++;
+    }
+    array.splice(index, 0, item);
+    if (array.length > limit) {
+        array.pop();
+    }
+}
+
+async function matchOrders(node, oppositeArray, sameArray, tradeType) {
+    while (oppositeArray.length > 0 && (tradeType === 0 ? oppositeArray[0].price <= node.price : oppositeArray[0].price >= node.price) && node.quantity > 0) {
+        const oppositeNode = oppositeArray[0];
+
+        if (node.quantity >= oppositeNode.quantity) {
+            node.quantity -= oppositeNode.quantity;
+            oppositeNode.quantity = 0;
+            await updateBidStatus(oppositeNode.id, 1, 0); // update status to completed
+            // call the trade function
+            oppositeArray.shift();
+        } else {
+            oppositeNode.quantity -= node.quantity;
+            node.quantity = 0;
+            oppositeArray[0].quantity = oppositeNode.quantity;
+            await updateBidStatus(oppositeNode.id, 0, oppositeNode.quantity); // update status to partially completed
+            // call the trade function
+        }
+    }
+
+    // updating the current node
+    if (node.quantity > 0) {
+        insertSorted(sameArray, node, (a, b) => tradeType === 0 ? b.price - a.price : a.price - b.price, 10);
+        await updateBidStatus(node.id, 0, node.quantity);
+    } else {
+        await updateBidStatus(node.id, 1, 0);
+    }
+}
+
+async function updateBidStatus(bidId, status, units) {
+    const query = `UPDATE bids SET units = $1, status = $2 WHERE id = $3`;
+    const values = [units, status, bidId];
+    await db.query(query, values);
+}
+
+async function trade(buyer_id, seller_id,channel_id ,units, price) {
+    // add the query for inserting the data into trades table
+}
 module.exports = router;
