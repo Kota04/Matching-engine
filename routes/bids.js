@@ -7,7 +7,7 @@ const redisClient = client.duplicate();
 
 router.post('/bid', async (req, res) => {
     const data = req.body;
-    const key = `${data.channel_id}_lock`;
+    const key = `${data.channel_id}_lock`; // Redis key for the lock
     // Validate input data
     if (!data.channel_id || !data.user_id || typeof data.price !== 'number' || typeof data.quantity !== 'number' || typeof data.type !== 'number') {
         return res.status(400).json({ error: 'Invalid input data' });
@@ -32,19 +32,13 @@ router.post('/bid', async (req, res) => {
         if (value) {
             [buy, sell] = JSON.parse(value);
         }
-
         // Process the order based on its type
         if (node.type === 0) {
             await processBuyOrder(node, buy, sell);
         } else {
             await processSellOrder(node, buy, sell);
         }
-
         // Save updated buy/sell arrays back to Redis
-        await redisClient.set(node.channel_id, JSON.stringify([buy, sell]));
-
-        
-
         res.status(201).json(node);
     } catch (error) {
         console.error('Error processing bid:', error);
@@ -59,15 +53,20 @@ router.post('/bid', async (req, res) => {
 
 async function processBuyOrder(node, buy, sell) {
     if (sell.length === 0 || sell[0].price > node.price) {
-        insertSorted(buy, node, (a, b) => b.price - a.price, 10);
+       buy=insertSorted(buy, node, (a, b) => b.price - a.price, 10);
+       await redisClient.set(node.channel_id, JSON.stringify([buy, sell]));
     } else {
-        await matchOrders(node, sell, buy, 0);
+        {
+            await matchOrders(node, sell, buy, 0);
     }
+    
+}
 }
 
 async function processSellOrder(node, buy, sell) {
     if (buy.length === 0 || buy[0].price < node.price) {
-        insertSorted(sell, node, (a, b) => a.price - b.price, 10);
+        sell=insertSorted(sell, node, (a, b) => a.price - b.price, 10);
+        await redisClient.set(node.channel_id, JSON.stringify([buy, sell]));
     } else {
         await matchOrders(node, buy, sell, 1);
     }
@@ -82,6 +81,7 @@ function insertSorted(array, item, comparator, limit) {
     if (array.length > limit) {
         array.pop();
     }
+    return array;
 }
 
 async function matchOrders(node, oppositeArray, sameArray, tradeType) {
@@ -101,15 +101,35 @@ async function matchOrders(node, oppositeArray, sameArray, tradeType) {
             await updateBidStatus(oppositeNode.id, 0, oppositeNode.quantity); // update status to partially completed
         }
     }
-
+    
     // updating the current node
     if (node.quantity > 0) {
-        insertSorted(sameArray, node, (a, b) => tradeType === 0 ? b.price - a.price : a.price - b.price, 10);
-        const query = `INSERT INTO bids (user_id, channel_id, units, price_per_unit, trade_type, time) 
-                   VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP) `;
+        const insertQuery = `INSERT INTO bids (user_id, channel_id, units, price_per_unit, trade_type, time) 
+        VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP) 
+        RETURNING id`;
         const values = [node.user_id, node.channel_id, node.quantity, node.price, node.type];
-        await db.query(query, values);
+        const res = await db.query(insertQuery, values);
+        node.id = res.rows[0].id;
+        sameArray = insertSorted(sameArray, node, (a, b) => tradeType === 0 ? b.price - a.price : a.price - b.price, 10);
     }
+    // repopulating the opposite arrays
+    if(tradeType === 0) 
+        {
+            const query = 'SELECT id, user_id, channel_id, price_per_unit AS price, units AS quantity, trade_type AS type FROM bids WHERE channel_id = $1 and status = 0 and trade_type = 1 ORDER BY price_per_unit ASC ORDER BY time ASC LIMIT 10';
+            const values = [oppositeNode.channel_id];
+            const res = await db.query(query, values);
+            oppositeArray = res.rows.map(row => new Node(row.id, row.user_id, row.channel_id, row.price, row.quantity, row.type));
+            await redisClient.set(node.channel_id, JSON.stringify([sameArray, oppositeArray])); // updating the redis cache
+        }
+    else
+    {
+        const query = 'SELECT id, user_id, channel_id, price_per_unit AS price, units AS quantity, trade_type AS type FROM bids WHERE channel_id = $1 and status = 0 and trade_type = 0 ORDER BY price_per_unit DESC ORDER BY time ASC LIMIT 10';
+        const values = [oppositeNode.channel_id];
+        const res = await db.query(query, values);
+        oppositeArray = res.rows.map(row => new Node(row.id, row.user_id, row.channel_id, row.price, row.quantity, row.type));
+        await redisClient.set(node.channel_id, JSON.stringify([oppositeArray, sameArray])); // updating the redis cache
+    }
+   
 }
 
 async function updateBidStatus(bidId, status, units) {
