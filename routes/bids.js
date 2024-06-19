@@ -2,28 +2,28 @@ const express = require('express');
 const db = require('../db');
 const Node = require('../models/Node');
 const client = require('../redis/index');
-
 const router = express.Router();
 const redisClient = client.duplicate();
 
 router.post('/bid', async (req, res) => {
     const data = req.body;
-    const query = `INSERT INTO bids (user_id, channel_id, units, price_per_unit, trade_type, time) 
-                   VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP) 
-                   RETURNING id`;
-    const values = [data.user_id, data.channel_id, data.quantity, data.price, data.type];
-
+    const key = `${data.channel_id}_lock`;
+    // Validate input data
+    if (!data.channel_id || !data.user_id || typeof data.price !== 'number' || typeof data.quantity !== 'number' || typeof data.type !== 'number') {
+        return res.status(400).json({ error: 'Invalid input data' });
+    }
     try {
         // Ensure Redis client is connected
         if (!redisClient.isOpen) await redisClient.connect();
+        
+        let val = await redisClient.get(key);
+        while(val!=null){
+            val = await redisClient.get(key);
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
 
-        // Database insert operation
-        const result = await db.query(query, values);
-        const id = result.rows[0].id;
-
-        // Create Node instance
-        const node = new Node(id, data.user_id, data.channel_id, data.price, data.quantity, data.type);
-        res.status(201).json(node);
+        await redisClient.set(key, 'locked'); // Acquire the lock
+        const node = new Node(0, data.user_id, data.channel_id, data.price, data.quantity, data.type);
 
         // Get current buy/sell arrays from Redis
         const value = await redisClient.get(node.channel_id);
@@ -42,9 +42,18 @@ router.post('/bid', async (req, res) => {
 
         // Save updated buy/sell arrays back to Redis
         await redisClient.set(node.channel_id, JSON.stringify([buy, sell]));
+
+        
+
+        res.status(201).json(node);
     } catch (error) {
         console.error('Error processing bid:', error);
         res.status(500).json({ error: 'Internal Server Error' });
+    }
+    finally{
+        // Release the lock
+        await redisClient.del(key);
+        redisClient.quit();
     }
 });
 
@@ -81,25 +90,25 @@ async function matchOrders(node, oppositeArray, sameArray, tradeType) {
 
         if (node.quantity >= oppositeNode.quantity) {
             node.quantity -= oppositeNode.quantity;
+            await insertTrade(node, oppositeNode, oppositeNode.quantity, oppositeNode.price, tradeType);
             oppositeNode.quantity = 0;
             await updateBidStatus(oppositeNode.id, 1, 0); // update status to completed
-            // call the trade function
             oppositeArray.shift();
         } else {
             oppositeNode.quantity -= node.quantity;
+            await insertTrade(node, oppositeNode, node.quantity, oppositeNode.price, tradeType);
             node.quantity = 0;
-            oppositeArray[0].quantity = oppositeNode.quantity;
             await updateBidStatus(oppositeNode.id, 0, oppositeNode.quantity); // update status to partially completed
-            // call the trade function
         }
     }
 
     // updating the current node
     if (node.quantity > 0) {
         insertSorted(sameArray, node, (a, b) => tradeType === 0 ? b.price - a.price : a.price - b.price, 10);
-        await updateBidStatus(node.id, 0, node.quantity);
-    } else {
-        await updateBidStatus(node.id, 1, 0);
+        const query = `INSERT INTO bids (user_id, channel_id, units, price_per_unit, trade_type, time) 
+                   VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP) `;
+        const values = [node.user_id, node.channel_id, node.quantity, node.price, node.type];
+        await db.query(query, values);
     }
 }
 
@@ -109,7 +118,16 @@ async function updateBidStatus(bidId, status, units) {
     await db.query(query, values);
 }
 
-async function trade(buyer_id, seller_id,channel_id ,units, price) {
-    // add the query for inserting the data into trades table
+async function insertTrade(buyNode, sellNode, quantity, price, tradeType) {
+    const query = `
+        INSERT INTO trades (bid_id, buyer_id, seller_id, channel_id, units, price_per_unit, time)
+        VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP);
+    `;
+    const values = tradeType === 0
+        ? [sellNode.id, buyNode.user_id, sellNode.user_id, sellNode.channel_id, quantity, price]
+        : [buyNode.id, buyNode.user_id, sellNode.user_id, buyNode.channel_id, quantity, price];
+
+    await db.query(query, values);
 }
+
 module.exports = router;
