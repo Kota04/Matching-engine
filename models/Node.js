@@ -4,9 +4,9 @@ class Node {
       this.id = id;
       this.user_id = user_id;
       this.channel_id = channel_id;
-      this.price = price;
-      this.quantity = quantity;
-      this.type = type;
+      this.price_per_unit = price;
+      this.units = quantity;
+      this.trade_type = type;
     }
   }
   
