@@ -2,30 +2,40 @@ import asyncio
 import aiohttp
 import json
 import time
+import uuid
+from datetime import datetime
 
 # URL of the target Node.js server endpoint
-url = "http://localhost:3000/buy"
+url = "http://localhost:3000/bids"
+
+# Helper function to generate UUIDs
+def generate_uuid():
+    return str(uuid.uuid4())
+
+# Helper function to get the current timestamp
+def current_timestamp():
+    return datetime.utcnow().isoformat()
 
 # Data to be sent with each request
 data_list = [
-    {"id": 1, "quantity": 40, "type": 0, "price": 300},
-    {"id": 2, "quantity": 60, "type": 1, "price": 400},
-    {"id": 3, "quantity": 50, "type": 0, "price": 500},
-    {"id": 4, "quantity": 70, "type": 1, "price": 600},
-    {"id": 5, "quantity": 80, "type": 0, "price": 700},
-    {"id": 6, "quantity": 50, "type": 1, "price": 500},
-    {"id": 7, "quantity": 40, "type": 0, "price": 700},
-    {"id": 8, "quantity": 80, "type": 1, "price": 400},
-    {"id": 9, "quantity": 90, "type": 0, "price": 300},
-    {"id": 10, "quantity": 85, "type": 1, "price": 400},
-    {"id": 11, "quantity": 80, "type": 0, "price": 500},
-    {"id": 12, "quantity": 90, "type": 1, "price": 300}
+    {"id": generate_uuid(), "user_id": generate_uuid(), "channel_id": generate_uuid(), "units": 25, "price_per_unit": 150, "trade_type": False, "time": current_timestamp(), "status": False},
+    {"id": generate_uuid(), "user_id": generate_uuid(), "channel_id": generate_uuid(), "units": 35, "price_per_unit": 250, "trade_type": True, "time": current_timestamp(), "status": False},
+    {"id": generate_uuid(), "user_id": generate_uuid(), "channel_id": generate_uuid(), "units": 45, "price_per_unit": 350, "trade_type": False, "time": current_timestamp(), "status": False},
+    {"id": generate_uuid(), "user_id": generate_uuid(), "channel_id": generate_uuid(), "units": 55, "price_per_unit": 450, "trade_type": True, "time": current_timestamp(), "status": False},
+    {"id": generate_uuid(), "user_id": generate_uuid(), "channel_id": generate_uuid(), "units": 65, "price_per_unit": 550, "trade_type": False, "time": current_timestamp(), "status": False},
+    {"id": generate_uuid(), "user_id": generate_uuid(), "channel_id": generate_uuid(), "units": 75, "price_per_unit": 650, "trade_type": True, "time": current_timestamp(), "status": False},
+    {"id": generate_uuid(), "user_id": generate_uuid(), "channel_id": generate_uuid(), "units": 85, "price_per_unit": 750, "trade_type": False, "time": current_timestamp(), "status": False},
+    {"id": generate_uuid(), "user_id": generate_uuid(), "channel_id": generate_uuid(), "units": 95, "price_per_unit": 850, "trade_type": True, "time": current_timestamp(), "status": False},
+    {"id": generate_uuid(), "user_id": generate_uuid(), "channel_id": generate_uuid(), "units": 105, "price_per_unit": 950, "trade_type": False, "time": current_timestamp(), "status": False},
+    {"id": generate_uuid(), "user_id": generate_uuid(), "channel_id": generate_uuid(), "units": 115, "price_per_unit": 1050, "trade_type": True, "time": current_timestamp(), "status": False},
+    {"id": generate_uuid(), "user_id": generate_uuid(), "channel_id": generate_uuid(), "units": 125, "price_per_unit": 1150, "trade_type": False, "time": current_timestamp(), "status": False},
+    {"id": generate_uuid(), "user_id": generate_uuid(), "channel_id": generate_uuid(), "units": 135, "price_per_unit": 1250, "trade_type": True, "time": current_timestamp(), "status": False}
 ]
 
 # Function to send a POST request from a specified local port to port 3000
 async def send_post_request(session, data, local_port):
     headers = {'Content-Type': 'application/json'}
-    url_with_port = f"http://localhost:3000/buy"  # Always target port 3000
+    url_with_port = f"http://localhost:3000/bids"  # Always target port 3000
     while True:
         try:
             async with session.post(url_with_port, headers=headers, data=json.dumps(data)) as response:
